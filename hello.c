@@ -2,7 +2,7 @@
 
 void main()
 {
-	printf("Hello git\n");
+	printf("Hello agit\n");
 
 }
 
