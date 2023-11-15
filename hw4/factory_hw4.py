@@ -1,40 +1,31 @@
 #!/usr/bin/env python3
-
+'''
+start factory
+'''
 import os
 import threading
+import sys
 from argparse import ArgumentParser
 from queue import Empty, Queue
 from time import sleep
-
-import cv2
 import numpy as np
-from openvino.inference_engine import IECore
-
-from iotdemo import FactoryController
-from iotdemo import MotionDetector
-from iotdemo import ColorDetector
-
 import openvino as ov
-import logging as log
-
+import cv2
+from iotdemo import FactoryController, MotionDetector, ColorDetector
 FORCE_STOP = False
 
-def thread_cam1(q):
-    # TODO: MotionDetector
+def thread_cam1(q_):
+    # Initialize motion detector and OpenVINO
+    '''
+    Thread1 start
+    '''
     det = MotionDetector()
     det.load_preset('resources/motion.cfg', 'default')
-
-    # TODO: Load and initialize OpenVINO
     model_path = 'resources/openvino.xml'
-    device = 'CPU'
-
     core = ov.Core()
     model = core.read_model(model_path)
     ppp = ov.preprocess.PrePostProcessor(model)
-
-    # TODO: HW2 Open video clip resources/conveyor.mp4 instead of camera device.
     cap = cv2.VideoCapture('resources/conveyor.mp4')
-
     flag = True
 
     while not FORCE_STOP:
@@ -42,61 +33,52 @@ def thread_cam1(q):
         _, frame = cap.read()
         if frame is None:
             break
-
-        # TODO: Motion detect
+        q_.put(("cam1", frame))
         detected = det.detect(frame)
         if detected is None:
             continue
-
-        # TODO: Enqueue "VIDEO:Cam1 detected", detected info.
-        q.put(('VIDEO: Cam1 detected', detected))
-
+        q_.put(('VIDEO: Cam1 detected', detected))
         input_tensor = np.expand_dims(detected, 0)
 
-        # TODO: Inference OpenVINO
-        if flag is True:
-            _, h, w, _ = input_tensor.shape
+        if flag:
+            _, _, _, _ = input_tensor.shape
             ppp.input().tensor()\
-                    .set_shape(input_tensor.shape)\
-                    .set_element_type(ov.Type.u8)\
-                    .set_layout(ov.Layout('NHWC'))
+                .set_shape(input_tensor.shape)\
+                .set_element_type(ov.Type.u8)\
+                .set_layout(ov.Layout('NHWC'))
             ppp.input().preprocess().resize(ov.preprocess.ResizeAlgorithm.RESIZE_LINEAR)
             ppp.input().model().set_layout(ov.Layout('NCHW'))
             ppp.output().tensor().set_element_type(ov.Type.f32)
-
             model = ppp.build()
-            compiled_model = core.compile_model(model, device)
+            compiled_model = core.compile_model(model, "CPU")
             flag = False
 
         results = compiled_model.infer_new_request({0: input_tensor})
         predictions = next(iter(results.values()))
         probs = predictions.reshape(-1)
 
-        x_ratio = probs[0]*100
-        circle_ratio = probs[1]*100
-
-        # TODO: Calculate ratios
-        print(f"X = {x_ratio:.2f}%, Circle = {circle_ratio:.2f}%")
-
-        # TODO: in queue for moving the actuator 1
-        if x_ratio > 80:
-            q.put(('PUSH', 1))
+        print(f"{probs}")
+        if probs[0] > 0.0:
+            print("Not Good")
+            q_.put(("PUSH", 1))
+        else:
+            print("Good")
 
     cap.release()
-    q.put(('DONE', None))
-    exit()
+    q_.put(('DONE', None))
+    sys.exit()
 
-
-def thread_cam2(q):
-    # TODO: MotionDetector
+def thread_cam2(q_):
+    # Initialize motion and color detectors
+    '''
+    Thread2 start
+    '''
     det = MotionDetector()
     det.load_preset('resources/motion.cfg', 'default')
 
-    # TODO: ColorDetector
     color = ColorDetector()
     color.load_preset('resources/color.cfg', 'default')
 
-    # TODO: HW2 Open "resources/conveyor.mp4" video clip
     cap = cv2.VideoCapture('resources/conveyor.mp4')
 
     while not FORCE_STOP:
@@ -104,67 +86,57 @@ def thread_cam2(q):
         _, frame = cap.read()
         if frame is None:
             break
-
-        # TODO: Detect motion
+        q_.put(("cam2", frame))
         detected = det.detect(frame)
         if detected is None:
             continue
+        q_.put(('VIDEO: Cam2 detected', detected))
 
-        # TODO: Enqueue "VIDEO:Cam2 detected", detected info.
-        q.put(('VIDEO: Cam2 detected', detected))
-
-        # TODO: Detect color
         predict = color.detect(detected)
         name, ratio = predict[0]
         _, ratio2 = predict[1]
 
-        n_ratio = ratio/(ratio+ratio2) * 100
-
-        # TODO: Compute ratio
+        n_ratio = ratio / (ratio + ratio2) * 100
         print(f"{name}: {n_ratio:.2f}%")
-
-        # TODO: Enqueue to handle actuator 2
         if name == 'blue':
-            q.put(('PUSH', 2))
+            q_.put(('PUSH', 2))
 
     cap.release()
-    q.put(('DONE', None))
-    exit()
-
+    q_.put(('DONE', None))
+    sys.exit()
 
 def imshow(title, frame, pos=None):
+    '''
+    imshow
+    '''
     cv2.namedWindow(title)
     if pos:
         cv2.moveWindow(title, pos[0], pos[1])
     cv2.imshow(title, frame)
 
-
 def main():
+    '''
+    main start
+    '''
     global FORCE_STOP
-
     parser = ArgumentParser(prog='python3 factory.py',
                             description="Factory tool")
-
     parser.add_argument("-d",
                         "--device",
                         default=None,
                         type=str,
                         help="Arduino port")
     args = parser.parse_args()
-
     q = Queue()
-    t1 = threading.Thread(target=thread_cam1, args=(q,))
-    t2 = threading.Thread(target=thread_cam2, args=(q,))
-    t1.start()
-    t2.start()
-
+    t_1 = threading.Thread(target=thread_cam1, args=(q,))
+    t_2 = threading.Thread(target=thread_cam2, args=(q,))
+    t_1.start()
+    t_2.start()
     with FactoryController(args.device) as ctrl:
         ctrl.system_start()
         while not FORCE_STOP:
             if cv2.waitKey(10) & 0xff == ord('q'):
                 break
-
-            # TODO: Control actuator, name == 'PUSH'
             try:
                 name, frame = q.get(timeout=1)
                 if name == 'PUSH':
@@ -172,21 +144,17 @@ def main():
                 elif name:
                     imshow(name, frame)
                 q.task_done()
-
                 if name == 'DONE':
                     FORCE_STOP = True
-
             except Empty:
                 pass
-
-    t1.join()
-    t2.join()
+    t_1.join()
+    t_2.join()
     cv2.destroyAllWindows()
     ctrl.system_stop()
     ctrl.close()
-
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
-        os._exit(0)
+    except OSError:
+        os._exit(0)  # Use the correct syntax for exiting the script
